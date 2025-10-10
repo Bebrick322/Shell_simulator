@@ -1,1 +1,1 @@
-# Resulov_Shell_simulator
+"Project info" 

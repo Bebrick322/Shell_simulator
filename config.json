@@ -1,0 +1,4 @@
+{
+  "vfs_path": "vfs_minimal.zip",
+  "startup_script": "scripts/test_minimal.sh"
+}
