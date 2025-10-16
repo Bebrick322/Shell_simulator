@@ -1,4 +1,4 @@
 {
-  "vfs_path": "vfs_minimal.zip",
-  "startup_script": "scripts/test_minimal.sh"
+  "vfs_path": "vfs_deep.zip",
+  "startup_script": "scripts/test_all.sh"
 }

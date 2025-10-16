@@ -1,3 +1,4 @@
+# (весь файл, заменяющий shell_emulator.py)
 import tkinter as tk
 from tkinter import scrolledtext
 import re
@@ -9,7 +10,7 @@ import os
 import sys
 import zipfile
 from io import BytesIO
-
+import base64
 
 def parse_arguments(line):
     """Разбирает строку на аргументы, корректно обрабатывая кавычки."""
@@ -27,7 +28,7 @@ def parse_arguments(line):
 
 class VirtualFileSystem:
     def __init__(self, zip_path=None):
-        self.file_tree = {}  # Хранение путей: путь -> {type, content}
+        self.file_tree = {}  # путь -> {type, content, binary?}
         self.current_dir = "/"
         if zip_path:
             self.load_from_zip(zip_path)
@@ -49,15 +50,23 @@ class VirtualFileSystem:
             if path.endswith("/"):
                 self._add_dir(path.rstrip("/"))
             else:
-                content = archive.read(file_info).decode('utf-8', errors='replace')
-                self._add_file(path, content)
+                raw = archive.read(file_info)
+                # Попытка декодирования как text (utf-8)
+                try:
+                    text = raw.decode('utf-8')
+                    # Считать как текстовый файл
+                    self._add_file(path, text, binary=False)
+                except Exception:
+                    # Для бинарных данных — хранить в base64
+                    b64 = base64.b64encode(raw).decode('ascii')
+                    self._add_file(path, b64, binary=True)
 
         # Гарантируется существование корня
         if "/" not in self.file_tree:
             self.file_tree["/"] = {"type": "dir"}
 
     def _add_dir(self, path):
-        parts = path.strip("/").split("/")
+        parts = path.strip("/").split("/") if path.strip("/") else []
         current = ""
         for part in parts:
             if not current:
@@ -67,13 +76,16 @@ class VirtualFileSystem:
             if current not in self.file_tree:
                 self.file_tree[current] = {"type": "dir"}
 
-    def _add_file(self, path, content=""):
+    def _add_file(self, path, content="", binary=False):
         parent = "/".join(path.split("/")[:-1]) or "/"
         if parent != "" and parent not in self.file_tree:
             self._add_dir(parent)
         elif parent == "":
             self._add_dir("/")
-        self.file_tree[path] = {"type": "file", "content": content}
+        entry = {"type": "file", "content": content}
+        if binary:
+            entry["binary"] = True
+        self.file_tree[self._normalize_path(path)] = entry
 
     def list_dir(self, path):
         """Возвращает список элементов указанной директории."""
@@ -116,10 +128,14 @@ class VirtualFileSystem:
         return "/" + "/".join(parts) if parts else "/"
 
     def get_content(self, path):
-        """Возвращает содержимое файла по относительному или абсолютному пути."""
+        """Возвращает содержимое файла по относительному или абсолютному пути.
+           Если файл бинарный — возвращает None (чтобы команды текста корректно реагировали)."""
         full_path = self._resolve_path(path)
         if full_path in self.file_tree and self.file_tree[full_path]["type"] == "file":
-            return self.file_tree[full_path]["content"]
+            entry = self.file_tree[full_path]
+            if entry.get("binary"):
+                return None
+            return entry.get("content", "")
         return None
 
     def create_file(self, path):
@@ -139,12 +155,13 @@ class VirtualFileSystem:
 
 
 class ShellEmulator:
-    def __init__(self, root, vfs_path, startup_script):
+    def __init__(self, root, vfs_path, startup_script, config_error=None):
         self.root = root
         self.vfs_path = vfs_path
         self.startup_script = startup_script
         self.vfs = VirtualFileSystem()
         self.command_history = []
+        self.config_error = config_error
 
         # Получение данных пользователя и хоста для заголовка и приглашения
         self.username = getpass.getuser()
@@ -204,6 +221,8 @@ class ShellEmulator:
         self.text_area.insert(tk.END, "НАСТРОЙКИ ЭМУЛЯТОРА\n")
         self.text_area.insert(tk.END, f"VFS путь: {self.vfs_path or 'не задан'}\n")
         self.text_area.insert(tk.END, f"Стартовый скрипт: {self.startup_script or 'не задан'}\n")
+        if self.config_error:
+            self.text_area.insert(tk.END, f"Ошибка чтения конфига: {self.config_error}\n")
         if self.vfs.file_tree:
             self.text_area.insert(tk.END, "VFS: успешно загружена\n")
         self.text_area.insert(tk.END, "="*60 + "\n\n")
@@ -251,6 +270,7 @@ class ShellEmulator:
             try:
                 args = parse_arguments(line)
                 if args:
+                    self.command_history.append(line)
                     self.execute_command(args)
             except Exception as e:
                 self.show_error(f"[Line {line_num}] Execution error: {e}")
@@ -310,7 +330,12 @@ class ShellEmulator:
             if items is None:
                 self.show_error(f"ls: cannot access '{target}': No such file or directory")
             else:
-                self.show_output(" ".join(items) if items else "")
+                # выводим построчно для читаемости
+                if items:
+                    for it in items:
+                        self.show_output(it)
+                else:
+                    self.show_output("")
         elif command == "cd":
             if not rest:
                 self.show_error("cd: missing argument")
@@ -326,7 +351,7 @@ class ShellEmulator:
                 fname = rest[0]
                 content = self.vfs.get_content(fname)
                 if content is None:
-                    self.show_error(f"tac: {fname}: No such file")
+                    self.show_error(f"tac: {fname}: No such file or/or file is binary")
                 else:
                     lines = content.strip().split('\n')
                     self.show_output('\n'.join(reversed(lines)))
@@ -361,18 +386,23 @@ class ShellEmulator:
 
 
 def load_config_from_file(config_path):
-    """Чтение конфигурации из JSON-файла."""
-    if not config_path or not os.path.isfile(config_path):
-        return {}
+    """Чтение конфигурации из JSON-файла.
+       Возвращает (config_dict, error_message)."""
+    if not config_path:
+        return {}, None
+    if not os.path.isfile(config_path):
+        return {}, f"Config file not found: {config_path}"
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             return {
                 'vfs_path': data.get('vfs_path'),
                 'startup_script': data.get('startup_script')
-            }
-    except (json.JSONDecodeError, Exception):
-        return {}
+            }, None
+    except json.JSONDecodeError as je:
+        return {}, f"JSON decode error: {je}"
+    except Exception as e:
+        return {}, f"Cannot read config: {e}"
 
 
 def main():
@@ -382,8 +412,8 @@ def main():
     parser.add_argument('--config', help="Путь к конфигурационному файлу (JSON)")
     args = parser.parse_args()
 
-    # Чтение конфигурации из файла
-    config_data = load_config_from_file(args.config)
+    # Чтение конфигурации из файла (возвращает также ошибку чтения)
+    config_data, config_error = load_config_from_file(args.config)
 
     # Приоритет: CLI > config file
     vfs_path = args.vfs or config_data.get('vfs_path')
@@ -391,7 +421,7 @@ def main():
 
     # Запуск GUI
     root = tk.Tk()
-    app = ShellEmulator(root, vfs_path=vfs_path, startup_script=startup_script)
+    app = ShellEmulator(root, vfs_path=vfs_path, startup_script=startup_script, config_error=config_error)
     root.mainloop()
 
 
