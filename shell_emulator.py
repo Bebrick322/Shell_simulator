@@ -1,4 +1,3 @@
-# (весь файл, заменяющий shell_emulator.py)
 import tkinter as tk
 from tkinter import scrolledtext
 import re
@@ -28,7 +27,7 @@ def parse_arguments(line):
 
 class VirtualFileSystem:
     def __init__(self, zip_path=None):
-        self.file_tree = {}  # путь -> {type, content, binary?}
+        self.file_tree = {}  
         self.current_dir = "/"
         if zip_path:
             self.load_from_zip(zip_path)
@@ -427,3 +426,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
